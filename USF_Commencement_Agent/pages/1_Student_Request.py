@@ -1,6 +1,11 @@
 """
 Student-facing AI chat page for commencement exception requests.
 Uses Google Gemini with function calling via Streamlit's chat UI.
+
+NOTE: Streamlit reruns the entire script on every interaction, which
+closes the genai.Client's HTTP connection. To handle this, we create
+a fresh client + chat for each send, passing the stored conversation
+history so Gemini retains full context.
 """
 
 import json
@@ -126,7 +131,7 @@ def execute_tool(tool_name: str, tool_input: dict) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Gemini chat setup (cached in session state)
+# Gemini helpers
 # ─────────────────────────────────────────────────────────────────
 
 def get_api_key() -> str:
@@ -137,35 +142,45 @@ def get_api_key() -> str:
         return os.environ.get("GOOGLE_API_KEY", "")
 
 
-def init_gemini_chat():
-    """Create and cache a Gemini chat session in Streamlit session state."""
-    if "gemini_chat" not in st.session_state:
-        api_key = get_api_key()
-        if not api_key or api_key == "your-google-api-key-here":
-            return None
-
-        client = genai.Client(api_key=api_key)
-        declarations = build_gemini_declarations()
-
-        chat = client.chats.create(
-            model="gemini-2.0-flash",
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                tools=declarations,
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                    disable=True,
-                ),
-            ),
-        )
-        st.session_state.gemini_chat = chat
-
-    return st.session_state.gemini_chat
+def _build_config():
+    """Build a GenerateContentConfig with system prompt and tools."""
+    declarations = build_gemini_declarations()
+    return types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        tools=declarations,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+            disable=True,
+        ),
+    )
 
 
-def send_and_handle_tools(chat, message) -> str:
-    """Send a message to Gemini, handle tool calls, return final text."""
-    response = chat.send_message(message)
+def send_and_handle_tools(user_message) -> str:
+    """
+    Create a FRESH Gemini client and chat for this interaction,
+    replay the stored conversation history, send the new message,
+    handle any tool calls, and return the final text response.
 
+    This avoids the 'client has been closed' error that occurs
+    when Streamlit reruns the script and the old client is stale.
+    """
+    api_key = get_api_key()
+    client = genai.Client(api_key=api_key)
+    config = _build_config()
+
+    # Retrieve the Gemini-native history from session state
+    gemini_history = st.session_state.get("gemini_history", [])
+
+    # Create a new chat, replaying previous conversation
+    chat = client.chats.create(
+        model="gemini-2.0-flash",
+        config=config,
+        history=gemini_history,
+    )
+
+    # Send the new message
+    response = chat.send_message(user_message)
+
+    # Handle tool calls in a loop
     while response.function_calls:
         response_parts = []
         for fc in response.function_calls:
@@ -178,6 +193,9 @@ def send_and_handle_tools(chat, message) -> str:
                 )
             )
         response = chat.send_message(response_parts)
+
+    # Persist the updated Gemini history for the next rerun
+    st.session_state.gemini_history = list(chat._curated_history)
 
     return response.text or ""
 
@@ -216,15 +234,10 @@ if not api_key or api_key == "your-google-api-key-here":
     )
     st.stop()
 
-# Initialize chat
-chat = init_gemini_chat()
-if chat is None:
-    st.error("Could not initialize the AI agent. Check your API key.")
-    st.stop()
-
-# Initialize message history
+# Initialize display messages and Gemini history
 if "messages" not in st.session_state:
     st.session_state.messages = []
+    st.session_state.gemini_history = []
 
     # Send the initial SSO trigger message to Gemini
     initial_msg = (
@@ -233,7 +246,7 @@ if "messages" not in st.session_state:
         f"information and begin the commencement exception request process.]"
     )
     with st.spinner("Loading your information from Banner..."):
-        greeting = send_and_handle_tools(chat, initial_msg)
+        greeting = send_and_handle_tools(initial_msg)
 
     st.session_state.messages.append({"role": "assistant", "content": greeting})
 
@@ -252,7 +265,7 @@ if user_input := st.chat_input("Type your message..."):
     # Get agent response
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
-            agent_reply = send_and_handle_tools(chat, user_input)
+            agent_reply = send_and_handle_tools(user_input)
         st.markdown(agent_reply)
 
     st.session_state.messages.append({"role": "assistant", "content": agent_reply})
