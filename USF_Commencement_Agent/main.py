@@ -181,7 +181,7 @@ def run_agent():
 
     # Create a chat with system instructions, tools, and manual function calling
     chat = client.chats.create(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             tools=function_declarations,
