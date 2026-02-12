@@ -10,11 +10,13 @@ history so Gemini retains full context.
 
 import json
 import os
+import time
 import streamlit as st
 from datetime import datetime, timezone
 
 from google import genai
 from google.genai import types
+from google.genai.errors import ClientError
 
 from agent_config import SYSTEM_PROMPT, build_gemini_declarations
 from mock_services import get_sso_username, lookup_banner_record, db, ExceptionRequest
@@ -154,6 +156,20 @@ def _build_config():
     )
 
 
+def _send_with_retry(chat, message, max_retries=2):
+    """Send a message to Gemini with automatic retry on rate-limit errors."""
+    for attempt in range(max_retries + 1):
+        try:
+            return chat.send_message(message)
+        except ClientError as e:
+            if "429" in str(e) and attempt < max_retries:
+                wait = 15 * (attempt + 1)  # 15s, then 30s
+                st.toast(f"Rate limit hit — waiting {wait}s before retrying...", icon="\u23F3")
+                time.sleep(wait)
+            else:
+                raise
+
+
 def send_and_handle_tools(user_message) -> str:
     """
     Create a FRESH Gemini client and chat for this interaction,
@@ -172,32 +188,42 @@ def send_and_handle_tools(user_message) -> str:
 
     # Create a new chat, replaying previous conversation
     chat = client.chats.create(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         config=config,
         history=gemini_history,
     )
 
-    # Send the new message
-    response = chat.send_message(user_message)
+    try:
+        # Send the new message
+        response = _send_with_retry(chat, user_message)
 
-    # Handle tool calls in a loop
-    while response.function_calls:
-        response_parts = []
-        for fc in response.function_calls:
-            args = dict(fc.args) if fc.args else {}
-            result = execute_tool(fc.name, args)
-            response_parts.append(
-                types.Part.from_function_response(
-                    name=fc.name,
-                    response=result,
+        # Handle tool calls in a loop
+        while response.function_calls:
+            response_parts = []
+            for fc in response.function_calls:
+                args = dict(fc.args) if fc.args else {}
+                result = execute_tool(fc.name, args)
+                response_parts.append(
+                    types.Part.from_function_response(
+                        name=fc.name,
+                        response=result,
+                    )
                 )
+            response = _send_with_retry(chat, response_parts)
+
+        # Persist the updated Gemini history for the next rerun
+        st.session_state.gemini_history = list(chat._curated_history)
+
+        return response.text or ""
+
+    except ClientError as e:
+        if "429" in str(e):
+            return (
+                "\u26A0\uFE0F **Rate limit reached.** The free tier of Gemini allows "
+                "10 requests per minute and 250 per day. Please wait about a minute "
+                "and try again. Your conversation is saved — nothing is lost."
             )
-        response = chat.send_message(response_parts)
-
-    # Persist the updated Gemini history for the next rerun
-    st.session_state.gemini_history = list(chat._curated_history)
-
-    return response.text or ""
+        raise
 
 
 # ─────────────────────────────────────────────────────────────────
