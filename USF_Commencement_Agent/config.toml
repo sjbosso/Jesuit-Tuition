@@ -1,0 +1,10 @@
+[theme]
+# USF Brand Colors (Graphic Standards Manual)
+primaryColor = "#00543C"          # USF Green
+backgroundColor = "#FFFFFF"       # White
+secondaryBackgroundColor = "#E8F0ED"  # Light green tint
+textColor = "#222222"
+font = "sans serif"
+
+[server]
+headless = true
