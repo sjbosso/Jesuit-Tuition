@@ -157,15 +157,15 @@ def _build_config():
     )
 
 
-def _send_with_retry(chat, message, max_retries=2):
+def _send_with_retry(chat, message, max_retries=3):
     """Send a message to Gemini with automatic retry on rate-limit errors."""
     for attempt in range(max_retries + 1):
         try:
             return chat.send_message(message)
         except ClientError as e:
             if "429" in str(e) and attempt < max_retries:
-                wait = 15 * (attempt + 1)  # 15s, then 30s
-                st.toast(f"Rate limit hit — waiting {wait}s before retrying...", icon="\u23F3")
+                wait = 20 * (attempt + 1)  # 20s, 40s, 60s
+                st.toast(f"Rate limit hit — waiting {wait}s before retrying ({attempt + 1}/{max_retries})...", icon="\u23F3")
                 time.sleep(wait)
             else:
                 raise
